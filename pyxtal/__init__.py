@@ -1064,6 +1064,83 @@ class pyxtal:
 
         return idx, sites, t_types, k_types
 
+
+    def set_orbit_coordination(self, coordinations):
+        """
+        Assign target coordination labels aligned with independent atom_sites.
+    
+        Parameters
+        ----------
+        coordinations : sequence of int or None
+            One coordination value per independent Wyckoff orbit.
+        """
+        if self.molecular:
+            raise TypeError(
+                "set_orbit_coordination currently supports atomic crystals only"
+            )
+    
+        if len(coordinations) != len(self.atom_sites):
+            raise ValueError(
+                "The number of coordination labels must match atom_sites: "
+                f"{len(coordinations)} labels for "
+                f"{len(self.atom_sites)} atom sites"
+            )
+    
+        for site, coordination in zip(self.atom_sites, coordinations):
+            site.set_coordination(coordination)
+    
+    
+    def get_orbit_coordination(self):
+        """
+        Return target coordination labels aligned with independent atom_sites.
+        """
+        if self.molecular:
+            raise TypeError(
+                "get_orbit_coordination currently supports atomic crystals only"
+            )
+    
+        return [site.coordination for site in self.atom_sites]
+    
+    
+    def has_orbit_coordination(self, require_all=True):
+        """
+        Check whether target orbit-level coordination labels are present.
+        """
+        if self.molecular:
+            return False
+    
+        values = self.get_orbit_coordination()
+    
+        if require_all:
+            return all(value is not None for value in values)
+    
+        return any(value is not None for value in values)
+
+
+    def get_orbit_coordination_counts(self):
+        """
+        Return multiplicity-weighted counts for each target orbit label.
+        """
+        if self.molecular:
+            raise TypeError(
+                "Coordination counts are defined only for atomic structures"
+            )
+    
+        counts = {}
+    
+        for site in self.atom_sites:
+            label = site.coordination
+    
+            if label is None:
+                continue
+    
+            counts[label] = (
+                counts.get(label, 0)
+                + int(site.wp.multiplicity)
+            )
+    
+        return counts
+
     def _subgroup_by_splitter(self, splitter, eps=0.05, mut_lat=False):
         """
         Transform the crystal to subgroup symmetry from a splitter object
@@ -1168,11 +1245,36 @@ class pyxtal:
                     pos0 += np.dot(eps * dis * (np.random.random() -
                                    0.5), self.lattice.inv_matrix)
                     wp = Wyckoff_position.from_symops(ops2, h)
-                    split_sites.append(atom_site(wp, pos0, site.specie))
+                    split_sites.append(
+                        atom_site(
+                            wp,
+                            pos0,
+                            site.specie,
+                            coordination=site.coordination,
+                        )
+                    )
 
             new_struc.atom_sites = split_sites
             new_struc.numIons = [int(round(multiples * numIon))
                                  for numIon in self.numIons]
+
+            parent_counts = self.get_orbit_coordination_counts()
+            child_counts = new_struc.get_orbit_coordination_counts()
+
+            expected_counts = {
+                label: int(round(multiples * count))
+                for label, count in parent_counts.items()
+            }
+
+            if parent_counts and child_counts != expected_counts:
+                raise RuntimeError(
+                    "Coordination-label multiplicity mismatch after subgroup split: "
+                    f"parent={parent_counts}, "
+                    f"multiple={multiples}, "
+                    f"expected={expected_counts}, "
+                    f"child={child_counts}"
+                )
+
         new_struc.lattice = lattice
         new_struc.source = "subgroup"
 
@@ -1437,7 +1539,13 @@ class pyxtal:
                 for i, mol in enumerate(self.molecules):
                     if mol.name == site.molecule.name:
                         break
-                newsites.append(atom_site(site.wp, site.position, i + 1))
+                newsites.append(
+                    atom_site(
+                        site.wp,
+                        site.position,
+                        i + 1,
+                    )
+                )
             new_struc.atom_sites = newsites
             new_struc.group = self.group
             new_struc.standard_setting = site.wp.is_standard_setting()
@@ -1594,7 +1702,12 @@ class pyxtal:
                 sites[j] = mol_site(mol, pos_frac, ori, wp,
                                     lattice0, site.type)
             else:
-                sites[j] = atom_site(wp, pos_frac, site.specie)
+                sites[j] = atom_site(
+                    wp, 
+                    pos_frac, 
+                    site.specie,
+                    coordination=site.coordination,
+                )
 
         # update the hall number
         for i, site in enumerate(sites):
@@ -1932,7 +2045,12 @@ class pyxtal:
             pos = op.operate(site.position)
             pos1 = wp.search_generator(pos, self.group[0])
             if pos1 is not None:
-                new_struc.atom_sites[i] = atom_site(wp, pos1, site.specie)
+                new_struc.atom_sites[i] = atom_site(
+                    wp, 
+                    pos1, 
+                    site.specie,
+                    coordination=site.coordination,
+                )
             else:
                 return None
                 # print(pos)
@@ -1973,8 +2091,14 @@ class pyxtal:
                 self.group.number, letter)
             pos = op.operate(site.position)
             pos1 = wp.search_generator(pos, self.group[0])
+
             if pos1 is not None:
-                new_struc.atom_sites[i] = atom_site(wp, pos1, site.specie)
+                new_struc.atom_sites[i] = atom_site(
+                    wp, 
+                    pos1, 
+                    site.specie,
+                    coordination=site.coordination,
+                )
             else:
                 print(pos)
                 print(wp)
@@ -3295,7 +3419,10 @@ class pyxtal:
 
     def set_site_coordination(self, cutoff=None, verbose=False, exclude_ii=False):
         """
-        Compute the coordination number from each atomic site
+        Compute actual coordination numbers from the current geometry.
+
+        This is distinct from :meth:`set_orbit_coordination`, which assigns
+        target/annotated coordination labels to independent Wyckoff orbits.
         """
         from ase.neighborlist import neighbor_list
 
@@ -4385,3 +4512,4 @@ class pyxtal:
         pmg = self.to_pymatgen()
         pmg1 = xtal1.to_pymatgen()
         return get_pmg_dist(pmg, pmg1, ltol=ltol, stol=stol, angle_tol=angle_tol, scale=scale)
+

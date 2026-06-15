@@ -34,13 +34,34 @@ class atom_site:
         specie (str): element name or symbol, or atomic number
         search (bool): whether or not search generator for special WP
     """
-
-    def __init__(self, wp=None, coordinate=None, specie=1, search=False):
+    def __init__(
+        self,
+        wp=None,
+        coordinate=None,
+        specie=1,
+        search=False,
+        coordination=None,
+    ):
         self.position = np.array(coordinate)
         self.position -= np.floor(self.position)
         self.specie = Element(specie).short_name
         self.wp = wp
-        self.coordination = None
+    
+        if coordination is not None:
+            if not isinstance(coordination, (int, np.integer)):
+                raise TypeError(
+                    "coordination must be an integer or None; "
+                    f"got {type(coordination).__name__}"
+                )
+    
+            if coordination < 0:
+                raise ValueError(
+                    f"coordination must be non-negative; got {coordination}"
+                )
+    
+            coordination = int(coordination)
+    
+        self.coordination = coordination
 
         self._get_dof()
         self.PBC = self.wp.PBC
@@ -77,6 +98,7 @@ class atom_site:
             "position": self.position,
             "specie": self.specie,
             "wp": self.wp.save_dict(),
+            "coordination": self.coordination,
         }
 
     def _get_dof(self):
@@ -97,20 +119,28 @@ class atom_site:
 
     @classmethod
     def load_dict(cls, dicts):
-        """
-        load the sites from a dictionary
-        """
+        """Load an atom_site from a dictionary."""
 
         position = dicts["position"]
         specie = dicts["specie"]
+        coordination = dicts.get("coordination", None)
+
         if "wp" in dicts:
             wp = Wyckoff_position.load_dict(dicts["wp"])
         else:
             hn, index = dicts["hn"], dicts["index"]
             wp = Wyckoff_position.from_group_and_index(
-                hn, index, use_hall=True)
+                hn, 
+                index, 
+                use_hall=True
+            )
 
-        return cls(wp, position, specie)
+        return cls(
+            wp,
+            position,
+            specie,
+            coordination=coordination,
+        )
 
     def perturbate(self, lattice, magnitude=0.1):
         """
@@ -150,6 +180,27 @@ class atom_site:
             print("\nInput xyz", self.position)
             print("Target operation", self.wp.ops[0].as_xyz_str())
             raise ValueError("Cannot generate the desried generator")
+
+    def set_coordination(self, coordination):
+        """Assign an orbit-level coordination label."""
+        if coordination is None:
+            self.coordination = None
+            return
+
+        if not isinstance(coordination, (int, np.integer)):
+            raise TypeError(
+                "coordination must be an integer or None; "
+                f"got {type(coordination).__name__}"
+            )
+
+        coordination = int(coordination)
+
+        if coordination < 0:
+            raise ValueError(
+                f"coordination must be non-negative; got {coordination}"
+            )
+
+        self.coordination = coordination
 
     def encode(self):
         """
