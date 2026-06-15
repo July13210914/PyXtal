@@ -3,6 +3,7 @@ Database class
 """
 
 import os
+import json
 import logging
 
 import numpy as np
@@ -625,6 +626,126 @@ class database:
             #self.db.update(row.id, data=data)
             #print("updated the data for", row.csd_code)
 
+def _json_default(value):
+    """Convert common NumPy values for JSON serialization."""
+    if isinstance(value, np.integer):
+        return int(value)
+
+    if isinstance(value, np.floating):
+        return float(value)
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+
+    raise TypeError(
+        f"Object of type {type(value).__name__} "
+        "is not JSON serializable"
+    )
+
+
+def _serialize_site_properties(xtal):
+    """Serialize atom-site property dictionaries as compact JSON."""
+    properties = []
+
+    for index, site in enumerate(xtal.atom_sites):
+        prop = getattr(site, "property", None)
+
+        if prop is None:
+            prop = {}
+
+        if not isinstance(prop, dict):
+            raise TypeError(
+                "atom_site.property must be a dictionary at site "
+                f"{index}; received {type(prop).__name__}."
+            )
+
+        properties.append(prop)
+
+    return json.dumps(
+        properties,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=_json_default,
+    )
+
+
+def _restore_site_properties(xtal, row):
+    """Restore atom-site properties from an ASE database row.
+
+    New databases use site_properties_json.
+
+    Older mixed-CN databases are supported through cn_labels_json and
+    cn_wp_labels.
+    """
+    if hasattr(row, "site_properties_json"):
+        properties = json.loads(row.site_properties_json)
+
+        if len(properties) != len(xtal.atom_sites):
+            raise ValueError(
+                "Stored site-property count does not match reconstructed "
+                f"atom-site count: {len(properties)} versus "
+                f"{len(xtal.atom_sites)}."
+            )
+
+        for index, (site, prop) in enumerate(
+            zip(xtal.atom_sites, properties)
+        ):
+            if prop is None:
+                prop = {}
+
+            if not isinstance(prop, dict):
+                raise TypeError(
+                    "Stored site property must be a dictionary at site "
+                    f"{index}; received {type(prop).__name__}."
+                )
+
+            site.property = prop
+
+        return
+
+    # Backward compatibility for your existing mixed34 database.
+    if hasattr(row, "cn_labels_json"):
+        labels = json.loads(row.cn_labels_json)
+
+        if len(labels) != len(xtal.atom_sites):
+            raise ValueError(
+                "Stored CN-label count does not match reconstructed "
+                f"atom-site count: {len(labels)} versus "
+                f"{len(xtal.atom_sites)}."
+            )
+
+        if hasattr(row, "cn_wp_labels"):
+            stored_wps = json.loads(row.cn_wp_labels)
+            current_wps = [
+                site.wp.get_label()
+                for site in xtal.atom_sites
+            ]
+
+            if stored_wps != current_wps:
+                raise ValueError(
+                    "Stored CN-label Wyckoff ordering does not match "
+                    "the reconstructed structure: "
+                    f"{stored_wps} versus {current_wps}."
+                )
+
+        for index, (site, label) in enumerate(
+            zip(xtal.atom_sites, labels)
+        ):
+            label = int(label)
+
+            if label not in (3, 4):
+                raise ValueError(
+                    f"Invalid stored target coordination {label} "
+                    f"at atom-site {index}."
+                )
+
+            prop = getattr(site, "property", None)
+
+            if prop is None:
+                prop = {}
+
+            prop["target_coordination"] = label
+            site.property = prop
 
 class database_topology:
     """
@@ -729,7 +850,12 @@ class database_topology:
                 for key in self.keys:
                     if hasattr(row, key):
                         setattr(xtal, key, getattr(row, key))
-            return xtal
+
+                _restore_site_properties(
+                    xtal,
+                    row,
+                )
+                return xtal
         except:
             print(xtal_str)
             #import sys; sys.exit()
@@ -762,6 +888,9 @@ class database_topology:
             "wps": str(wps),
             "density": density,
             "dof": dof,
+            "site_properties_json": _serialize_site_properties(
+                xtal
+            ),
         }
         kvp.update(_kvp)
         atoms = xtal.to_ase(resort=False)
