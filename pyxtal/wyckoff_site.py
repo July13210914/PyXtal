@@ -41,27 +41,26 @@ class atom_site:
         specie=1,
         search=False,
         coordination=None,
+        property=None,
     ):
         self.position = np.array(coordinate)
         self.position -= np.floor(self.position)
         self.specie = Element(specie).short_name
         self.wp = wp
     
-        if coordination is not None:
-            if not isinstance(coordination, (int, np.integer)):
-                raise TypeError(
-                    "coordination must be an integer or None; "
-                    f"got {type(coordination).__name__}"
-                )
-    
-            if coordination < 0:
-                raise ValueError(
-                    f"coordination must be non-negative; got {coordination}"
-                )
-    
-            coordination = int(coordination)
-    
-        self.coordination = coordination
+        # ``coordination`` is reserved for the coordination number computed
+        # from the current geometry. Persistent annotations used by workflows
+        # such as LEGO-Xtal belong in ``property`` instead.
+        self.coordination = self._validate_coordination(coordination)
+
+        if property is None:
+            property = {}
+        elif not isinstance(property, dict):
+            raise TypeError(
+                "property must be a dict or None; "
+                f"got {type(property).__name__}"
+            )
+        self.property = deepcopy(property)
 
         self._get_dof()
         self.PBC = self.wp.PBC
@@ -79,6 +78,9 @@ class atom_site:
         s += f"WP [{self.wp.get_label()}] "
         if self.coordination is not None:
             s += f" CN [{self.coordination:2d}] "
+        target = self.property.get("target_coordination")
+        if target is not None:
+            s += f" target_CN [{target:2d}] "
         s += "Site [{:}]".format(self.wp.site_symm.replace(" ", ""))
 
         return s
@@ -99,6 +101,7 @@ class atom_site:
             "specie": self.specie,
             "wp": self.wp.save_dict(),
             "coordination": self.coordination,
+            "property": deepcopy(self.property),
         }
 
     def _get_dof(self):
@@ -124,6 +127,14 @@ class atom_site:
         position = dicts["position"]
         specie = dicts["specie"]
         coordination = dicts.get("coordination", None)
+        property = dicts.get("property", None)
+
+        # Migration path for the first coordination-label implementation:
+        # dictionaries written by that version stored the target label in the
+        # top-level ``coordination`` field and had no ``property`` mapping.
+        if property is None and "coordination" in dicts:
+            property = {"target_coordination": coordination}
+            coordination = None
 
         if "wp" in dicts:
             wp = Wyckoff_position.load_dict(dicts["wp"])
@@ -140,6 +151,7 @@ class atom_site:
             position,
             specie,
             coordination=coordination,
+            property=property,
         )
 
     def perturbate(self, lattice, magnitude=0.1):
@@ -181,26 +193,49 @@ class atom_site:
             print("Target operation", self.wp.ops[0].as_xyz_str())
             raise ValueError("Cannot generate the desried generator")
 
-    def set_coordination(self, coordination):
-        """Assign an orbit-level coordination label."""
+    @staticmethod
+    def _validate_coordination(coordination):
+        """Validate a coordination number or coordination-like label."""
         if coordination is None:
-            self.coordination = None
-            return
-
+            return None
         if not isinstance(coordination, (int, np.integer)):
             raise TypeError(
                 "coordination must be an integer or None; "
                 f"got {type(coordination).__name__}"
             )
-
         coordination = int(coordination)
-
         if coordination < 0:
             raise ValueError(
                 f"coordination must be non-negative; got {coordination}"
             )
+        return coordination
 
-        self.coordination = coordination
+    def set_coordination(self, coordination):
+        """Set the coordination number computed from the current geometry."""
+        self.coordination = self._validate_coordination(coordination)
+
+    def set_property(self, key, value):
+        """Set a persistent site-level annotation."""
+        if not isinstance(key, str):
+            raise TypeError("property key must be a string")
+        self.property[key] = deepcopy(value)
+
+    def get_property(self, key, default=None):
+        """Return a persistent site-level annotation."""
+        return self.property.get(key, default)
+
+    def set_target_coordination(self, coordination):
+        """Set the target coordination annotation used by generation models."""
+        coordination = self._validate_coordination(coordination)
+        if coordination is None:
+            self.property.pop("target_coordination", None)
+        else:
+            self.property["target_coordination"] = coordination
+
+    @property
+    def target_coordination(self):
+        """Target coordination annotation, if one has been assigned."""
+        return self.property.get("target_coordination")
 
     def encode(self):
         """

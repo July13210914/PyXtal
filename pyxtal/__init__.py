@@ -1087,7 +1087,7 @@ class pyxtal:
             )
     
         for site, coordination in zip(self.atom_sites, coordinations):
-            site.set_coordination(coordination)
+            site.set_target_coordination(coordination)
     
     
     def get_orbit_coordination(self):
@@ -1099,7 +1099,7 @@ class pyxtal:
                 "get_orbit_coordination currently supports atomic crystals only"
             )
     
-        return [site.coordination for site in self.atom_sites]
+        return [site.target_coordination for site in self.atom_sites]
     
     
     def has_orbit_coordination(self, require_all=True):
@@ -1129,7 +1129,7 @@ class pyxtal:
         counts = {}
     
         for site in self.atom_sites:
-            label = site.coordination
+            label = site.target_coordination
     
             if label is None:
                 continue
@@ -1250,7 +1250,7 @@ class pyxtal:
                             wp,
                             pos0,
                             site.specie,
-                            coordination=site.coordination,
+                            property=site.property,
                         )
                     )
 
@@ -1706,7 +1706,7 @@ class pyxtal:
                     wp, 
                     pos_frac, 
                     site.specie,
-                    coordination=site.coordination,
+                    property=site.property,
                 )
 
         # update the hall number
@@ -2049,7 +2049,7 @@ class pyxtal:
                     wp, 
                     pos1, 
                     site.specie,
-                    coordination=site.coordination,
+                    property=site.property,
                 )
             else:
                 return None
@@ -2097,7 +2097,7 @@ class pyxtal:
                     wp, 
                     pos1, 
                     site.specie,
-                    coordination=site.coordination,
+                    property=site.property,
                 )
             else:
                 print(pos)

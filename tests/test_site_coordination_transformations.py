@@ -77,7 +77,7 @@ def test_t_subgroup_preserves_coordination():
 
     assert child.has_orbit_coordination()
     assert all(
-        site.coordination in (3, 4)
+        site.target_coordination in (3, 4)
         for site in child.atom_sites
     )
     assert multiplicity_counts(child) == parent_counts
