@@ -5,6 +5,7 @@ Database class
 import os
 import json
 import logging
+import ast
 
 import numpy as np
 import pymatgen.analysis.structure_matcher as sm
@@ -669,83 +670,178 @@ def _serialize_site_properties(xtal):
     )
 
 
+def _normalise_site_property(prop, index):
+    """Validate and normalise one stored atom-site property dictionary."""
+    if prop is None:
+        prop = {}
+
+    if not isinstance(prop, dict):
+        raise TypeError(
+            "Stored site property must be a dictionary at site "
+            f"{index}; received {type(prop).__name__}."
+        )
+
+    return prop
+
+
+def _property_signature(prop):
+    """Return a deterministic signature used to test property equivalence."""
+    return json.dumps(
+        prop,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=_json_default,
+    )
+
+
+def _parse_stored_wyckoff_labels(row):
+    """Read the independent-site Wyckoff labels stored in an ASE row."""
+    if not hasattr(row, "wps"):
+        return None
+
+    value = row.wps
+    if isinstance(value, (list, tuple)):
+        labels = list(value)
+    else:
+        try:
+            labels = ast.literal_eval(str(value))
+        except (ValueError, SyntaxError):
+            return None
+
+    if not isinstance(labels, (list, tuple)):
+        return None
+
+    return [str(label) for label in labels]
+
+
+def _map_properties_by_wyckoff(properties, stored_wps, current_wps):
+    """Map stored properties onto a symmetry-reconstructed site list.
+
+    Symmetry finding can merge equivalent independent sites.  A reduced mapping
+    is accepted only when every current Wyckoff label can be associated with
+    stored sites carrying one identical property dictionary.  Conflicting
+    properties on sites that became indistinguishable remain a hard error.
+    """
+    if len(properties) != len(stored_wps):
+        raise ValueError(
+            "Stored site-property count does not match stored Wyckoff-label "
+            f"count: {len(properties)} versus {len(stored_wps)}."
+        )
+
+    # Fast path: reconstruction preserved site order exactly.
+    if list(stored_wps) == list(current_wps):
+        return properties
+
+    buckets = {}
+    for index, (wp, prop) in enumerate(zip(stored_wps, properties)):
+        buckets.setdefault(wp, []).append((index, prop))
+
+    mapped = []
+    for wp in current_wps:
+        candidates = buckets.get(wp, [])
+        if not candidates:
+            raise ValueError(
+                "Cannot map stored site properties after symmetry "
+                f"reconstruction: no stored site has Wyckoff label {wp!r}. "
+                f"Stored={stored_wps}, reconstructed={current_wps}."
+            )
+
+        signatures = {_property_signature(prop) for _, prop in candidates}
+        if len(signatures) != 1:
+            raise ValueError(
+                "Ambiguous site-property mapping after symmetry "
+                f"reconstruction: Wyckoff label {wp!r} has conflicting "
+                "stored properties."
+            )
+
+        mapped.append(candidates[0][1])
+        # Consume one entry when possible.  If symmetry reduction produced fewer
+        # current sites, identical remaining entries may legitimately disappear.
+        candidates.pop(0)
+
+    return mapped
+
+
 def _restore_site_properties(xtal, row):
     """Restore atom-site properties from an ASE database row.
 
-    New databases use site_properties_json.
-
-    Older mixed-CN databases are supported through cn_labels_json and
-    cn_wp_labels.
+    If symmetry reconstruction reduces the independent-site count, properties
+    are transferred by Wyckoff label only when all merged candidates carry
+    identical property dictionaries.  Ambiguous CN3/CN4 merges are rejected.
     """
-    if hasattr(row, "site_properties_json"):
-        properties = json.loads(row.site_properties_json)
+    current_wps = [site.wp.get_label() for site in xtal.atom_sites]
 
+    if hasattr(row, "site_properties_json"):
+        raw_properties = json.loads(row.site_properties_json)
+        properties = [
+            _normalise_site_property(prop, index)
+            for index, prop in enumerate(raw_properties)
+        ]
+
+        stored_wps = _parse_stored_wyckoff_labels(row)
         if len(properties) != len(xtal.atom_sites):
-            raise ValueError(
-                "Stored site-property count does not match reconstructed "
-                f"atom-site count: {len(properties)} versus "
-                f"{len(xtal.atom_sites)}."
+            if stored_wps is None:
+                raise ValueError(
+                    "Stored site-property count does not match reconstructed "
+                    f"atom-site count: {len(properties)} versus "
+                    f"{len(xtal.atom_sites)}, and no stored Wyckoff labels "
+                    "are available for safe remapping."
+                )
+            properties = _map_properties_by_wyckoff(
+                properties,
+                stored_wps,
+                current_wps,
+            )
+        elif stored_wps is not None and stored_wps != current_wps:
+            properties = _map_properties_by_wyckoff(
+                properties,
+                stored_wps,
+                current_wps,
             )
 
-        for index, (site, prop) in enumerate(
-            zip(xtal.atom_sites, properties)
-        ):
-            if prop is None:
-                prop = {}
-
-            if not isinstance(prop, dict):
-                raise TypeError(
-                    "Stored site property must be a dictionary at site "
-                    f"{index}; received {type(prop).__name__}."
-                )
-
+        for site, prop in zip(xtal.atom_sites, properties):
             site.property = prop
-
         return
 
-    # Backward compatibility for your existing mixed34 database.
+    # Backward compatibility for existing mixed34 databases.
     if hasattr(row, "cn_labels_json"):
-        labels = json.loads(row.cn_labels_json)
-
-        if len(labels) != len(xtal.atom_sites):
-            raise ValueError(
-                "Stored CN-label count does not match reconstructed "
-                f"atom-site count: {len(labels)} versus "
-                f"{len(xtal.atom_sites)}."
-            )
-
-        if hasattr(row, "cn_wp_labels"):
-            stored_wps = json.loads(row.cn_wp_labels)
-            current_wps = [
-                site.wp.get_label()
-                for site in xtal.atom_sites
-            ]
-
-            if stored_wps != current_wps:
-                raise ValueError(
-                    "Stored CN-label Wyckoff ordering does not match "
-                    "the reconstructed structure: "
-                    f"{stored_wps} versus {current_wps}."
-                )
-
-        for index, (site, label) in enumerate(
-            zip(xtal.atom_sites, labels)
-        ):
-            label = int(label)
-
+        labels = [int(value) for value in json.loads(row.cn_labels_json)]
+        properties = []
+        for index, label in enumerate(labels):
             if label not in (3, 4):
                 raise ValueError(
                     f"Invalid stored target coordination {label} "
                     f"at atom-site {index}."
                 )
+            properties.append({"target_coordination": label})
 
-            prop = getattr(site, "property", None)
+        if hasattr(row, "cn_wp_labels"):
+            stored_wps = [str(value) for value in json.loads(row.cn_wp_labels)]
+        else:
+            stored_wps = _parse_stored_wyckoff_labels(row)
 
-            if prop is None:
-                prop = {}
+        if len(properties) != len(xtal.atom_sites) or (
+            stored_wps is not None and stored_wps != current_wps
+        ):
+            if stored_wps is None:
+                raise ValueError(
+                    "Stored CN-label count does not match reconstructed "
+                    f"atom-site count: {len(labels)} versus "
+                    f"{len(xtal.atom_sites)}, and no stored Wyckoff labels "
+                    "are available for safe remapping."
+                )
+            properties = _map_properties_by_wyckoff(
+                properties,
+                stored_wps,
+                current_wps,
+            )
 
-            prop["target_coordination"] = label
-            site.property = prop
+        for site, prop in zip(xtal.atom_sites, properties):
+            existing = getattr(site, "property", None)
+            if existing is None:
+                existing = {}
+            existing.update(prop)
+            site.property = existing
 
 class database_topology:
     """
@@ -810,56 +906,50 @@ class database_topology:
         print(f"Rank {self.rank} memory: {mem:.1f} MB")
 
     def get_pyxtal(self, id, use_relaxed=None, tol=1e-4):
-        """
-        Get pyxtal based on row_id, if use_relaxed, get pyxtal from ff_relaxed
+        """Reconstruct a PyXtal object from one database row.
 
-        Args:
-            id (int): row id
-            use_relaxed (str): 'ff_relaxed', 'vasp_relaxed'
+        Rows whose symmetry reconstruction makes stored site properties
+        ambiguous are reported and skipped instead of terminating a batch.
         """
         from pymatgen.core import Structure
         from pyxtal import pyxtal
         from pyxtal.util import ase2pymatgen
-        from pyxtal.symmetry import Group
 
         row = self.db.get(id)
-        #print(row.space_group_number, row.topology, row.pearson_symbol, row.wps, row.mace_energy)
-        if use_relaxed is not None:
-            if hasattr(row, use_relaxed):
+        xtal_str = None
+
+        try:
+            if use_relaxed is not None and hasattr(row, use_relaxed):
                 xtal_str = getattr(row, use_relaxed)
                 pmg = Structure.from_str(xtal_str, fmt="cif")
             else:
-                print(f"No {use_relaxed} attributes for structure", id)
+                if use_relaxed is not None:
+                    print(f"No {use_relaxed} attributes for structure {id}; using atoms")
                 atom = self.db.get_atoms(id=id)
                 pmg = ase2pymatgen(atom)
-        else:
-            #hn = Group(row.space_group_number).hall_number
-            xtal1 = pyxtal()
-            #xtal1.from_seed('1.cif', tol=tol)#, hn=hn)
-            atom = self.db.get_atoms(id=id)
-            #print(row.topology)
-            #atom.write('1.cif', format='cif')#, direct=True, vasp5=True)
-            xtal1.from_seed(atom, tol=tol)#, hn=hn)
-            pmg = ase2pymatgen(atom)
 
-        xtal = pyxtal()
-        try:
+            xtal = pyxtal()
             xtal.from_seed(pmg, tol=tol)
-            #if xtal.group.number != row.space_group_number: print(xtal); import sys; sys.exit()
-            if xtal is not None and xtal.valid:
-                for key in self.keys:
-                    if hasattr(row, key):
-                        setattr(xtal, key, getattr(row, key))
+            if xtal is None or not xtal.valid:
+                raise ValueError("PyXtal reconstruction returned an invalid structure")
 
-                _restore_site_properties(
-                    xtal,
-                    row,
-                )
-                return xtal
-        except:
-            print(xtal_str)
-            #import sys; sys.exit()
-            print("Cannot load the structure")
+            for key in self.keys:
+                if hasattr(row, key):
+                    setattr(xtal, key, getattr(row, key))
+
+            _restore_site_properties(xtal, row)
+            return xtal
+
+        except Exception as exc:
+            message = (
+                f"Cannot load database row {id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            print(message)
+            self.logging.warning(message)
+            if xtal_str is not None:
+                self.logging.debug("Relaxed CIF for failed row %s:\n%s", id, xtal_str)
+            return None
 
     def get_all_xtals(self, include_energy=False):
         """
@@ -1531,6 +1621,10 @@ class database_topology:
         """
         results = []
         for id, xtal in generator:
+            if xtal is None:
+                self.logging.warning(f"Skipping row {id}: PyXtal reconstruction failed")
+                print(f"Skipping row {id}: PyXtal reconstruction failed")
+                continue
             self.logging.info(f"Processing {id} {xtal.lattice} {args[0]}")
             print(f"Processing {id} {xtal.lattice} {args[0]}")
             res = opt_single(id, xtal, *args)
@@ -1593,6 +1687,10 @@ class database_topology:
             for _id, xtal in chunk:
                 if xtal is not None:
                     myargs.append(tuple([_id, xtal] + args))
+
+            if not myargs:
+                self.logging.warning("Skipping empty energy minicycle: no rows reconstructed")
+                continue
 
             results = []
             self.logging.info(f"Start minicycle: {myargs[0][0]}-{myargs[-1][0]}")
